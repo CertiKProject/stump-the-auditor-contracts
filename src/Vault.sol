@@ -12,14 +12,29 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IVault} from "./interfaces/IVault.sol";
 
 /// @title Multi-asset vault with fee accrual and withdrawal timelocks
-/// @notice Deposits and withdrawal requests are blocked while paused, but claim and cancel remain available so users can
-///         always exit pending positions.
-/// @notice Yield reports pull whitelisted assets into the vault, so managed-asset accounting never gets ahead of live
-///         balances.
-/// @dev Pending withdrawals are excluded from active share accounting so burning shares into a timelocked claim does not
-///      masquerade as yield for remaining shareholders. Future reported yield is split between active capital and pending
-///      claims pro rata; the pending-side net yield is written directly into each request while the active side continues
-///      through the per-share high-water-mark path.
+///
+/// @notice Accounting model — read this before attempting to modify anything:
+///
+///   Unit conventions:
+///     - WAD (1e18): internal denominator for all multi-asset accounting. Token balances are normalized to WAD on entry,
+///       denormalized on exit.
+///     - BPS (10_000): fee rate configuration (performance + management).
+///     - PPS_SCALE = WAD * VSO: internal precision unit for the per-share price calculation.
+///
+///   Active vs. pending capital:
+///     - `totalManagedWad` tracks all capital ever deposited + yield reported, minus what has been released.
+///     - `totalPendingWithdrawWad` is the frozen WAD claim on capital held for timelocked withdrawals.
+///     - `_activeManagedWad() = totalManagedWad - totalPendingWithdrawWad` is the base used for per-share price (PPS).
+///       This carve-out prevents `requestWithdraw` from ever lifting PPS and masquerading as yield.
+///
+///   Fee schedule — `_accrueFees()` runs on every state-mutating entry point:
+///     1. Time passes -> management fee minted to fee recipient (dilution-based, uses `_effectiveTotalShares`).
+///     2. Current PPS recomputed (only `reportYield` actually lifts it; deposit/withdraw are construction-preserving).
+///     3. If PPS > high-water-mark PPS, performance fee minted on the lift × active shares.
+///     4. Pending-side performance fee is charged proportionally at `reportYield` time, not here.
+///
+///   Pause matrix: deposit + requestWithdraw blocked; claimWithdraw + cancelWithdraw always available; reportYield is
+///   owner-only and also blocked while paused.
 contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 

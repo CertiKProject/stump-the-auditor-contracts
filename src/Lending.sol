@@ -15,10 +15,39 @@ import {ILendingPool} from "./interfaces/ILendingPool.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {LendingMath} from "./libs/LendingMath.sol";
 
-/// @title Lending
-/// @notice Multi-asset lending pool with scaled-balance accounting, utilization-based rates, and liquidation.
-/// @dev Pausing is intentionally asymmetric: `supply`, `borrow`, and `liquidate` are blocked while paused, but
-/// `withdraw`, `repay`, and the public accrual poke remain available so users can exit or de-risk during emergencies.
+/// @title Lending — multi-asset lending pool with scaled-balance accounting and liquidation
+///
+/// @notice Accounting model — read this before attempting to modify anything:
+///
+///   Scale conventions — four different precision units live here. Mixing them is a common bug class:
+///     - RAY (1e27): `supplyIndex`, `borrowIndex`, interest rates (per-year and per-second).
+///     - WAD (1e18): USD values (asset value, total debt, total collateral), health factor (1e18 = 1.0).
+///     - BPS (10_000): config params — `collateralFactorBps`, `liquidationThresholdBps`, `liquidationBonusBps`,
+///                     `reserveFactorBps`, `closeFactorBps`, `irParams.optimalUtilizationBps`.
+///     - Oracle (1e8): Chainlink-style raw price. Normalized to WAD via the helpers in `LendingMath`.
+///
+///   Scaled-balance invariant:
+///     `user_underlying_amount = user_scaled × index / RAY` (floor rounded).
+///     Both `supplyIndex` and `borrowIndex` monotonically increase over time. Suppliers' claim grows via supplyIndex;
+///     borrowers' debt grows via borrowIndex. The delta between them × reserveFactor accrues to `accruedReserves`.
+///
+///   Rounding directions (all favor the protocol):
+///     - supply: scaled amount rounded DOWN (user receives fewer scaled units).
+///     - withdraw: scaled amount burned rounded UP (user pays more scaled).
+///     - borrow: scaled amount rounded UP (borrower owes at least the requested).
+///     - repay: scaled amount credited rounded DOWN (user pays off slightly less per token).
+///
+///   Health factor: `HF = sum(collateralValueUSD × liquidationThreshold) / sum(debtValueUSD)` in WAD.
+///     HF >= 1e18 is healthy. HF < 1e18 is liquidatable.
+///     Withdraw with no debt skips oracle reads (no HF check needed).
+///
+///   Liquidation: anyone can repay up to `closeFactor × debt` of a borrower with HF < 1e18 and receive the borrower's
+///     collateral at a `liquidationBonus` discount. Liquidator receives collateral AS AN INTERNAL SUPPLY POSITION (no
+///     external transfer of collateral tokens). Debt asset ≠ collateral asset. Borrower ≠ liquidator.
+///
+///   Pause matrix: `supply`, `borrow`, `liquidate` blocked while paused. `withdraw`, `repay`, `accrueInterest` always
+///     available. `setBorrowEnabled(false)` / `setCollateralEnabled(false)` disable NEW actions only — liquidation of
+///     existing positions still proceeds regardless of the toggle.
 contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
     using SafeCast for uint256;
     using SafeERC20 for IERC20;

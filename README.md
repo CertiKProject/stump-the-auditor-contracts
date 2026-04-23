@@ -1,68 +1,129 @@
 # Stump the Auditor — Base Contracts
 
-Three production-style DeFi contracts used in CertiK's **Stump the Auditor** challenge. Participants modify one in ≤50 lines to plant a real fund-draining vulnerability, run it through AI Auditor Lite, and submit if it goes undetected. Top stumps win AI Auditor credits.
+Three production-style DeFi contracts for CertiK's **Stump the Auditor** challenge. Plant a fund-draining vulnerability in ≤50 lines, run it through AI Auditor Lite, and submit if it goes undetected. Top three stumps win.
 
-Contracts here are the **unmodified base** — written to be secure, verified across multiple rounds of adversarial review. Your job is to break them.
+These are the **unmodified base contracts** — secure as written, verified across multiple rounds of adversarial review. Your job is to break one.
 
-→ Challenge details and submission form: [challenge page / announcement link]
-→ Rules: [link]
+---
+
+## Challenge Rules (Quick Version)
+
+- **Modification budget:** ≤50 added or modified lines (ignoring whitespace; comments count)
+- **Scan budget:** 4 AI Auditor Lite scans total, use them however you want across the 3 contracts
+- **Must compile** under this repo's Foundry config
+- **Can't remove or rename** external/public function signatures
+- **No new imports** beyond what the contract already uses
+- **Severity bar:** Critical or High (see below)
+- **No trivial backdoors** — if a senior engineer would flag it in a PR without context, it's sabotage
+
+### Severity Bar
+
+**Critical:**
+- Direct theft of user funds
+- Permanent freezing of user funds
+- Protocol insolvency
+
+**High:**
+- Theft of unclaimed yield or rewards
+- Permanent freezing of unclaimed yield
+- Temporary freezing of user funds
+
+Medium and below are rejected. Exploits requiring privileged admin action or external conditions you don't control (oracle depeg, specific MEV) are rejected.
+
+### Auto-Disqualified
+
+- Unrestricted `drain()` / `rescue()` / `emergencyWithdraw()` added with no real access control
+- Hardcoded attacker address
+- Removed `onlyOwner` / `whenNotPaused` / `nonReentrant` modifier with no replacement
+- Inverted access control (`require(msg.sender == owner)` → `!= owner`)
+
+Test: could the diff read as a genuine developer mistake in a PR review? If yes, you're in. If no, it's sabotage and rejected.
+
+### Submission Contents
+
+- Modified `.sol`
+- Unified diff vs the base
+- AI Auditor Lite scan link (public, hash must match submitted file)
+- 200–500 word writeup: what the bug is, how to exploit, impact, why a dev could realistically ship this
+- Severity claim (Critical / High) with one-paragraph justification
+
+Full rules + submission form: **[challenge page / to be announced]**
+
+---
+
+## Trust Model
+
+The owner (`Ownable2Step`) can configure parameters, pause, list/de-list assets, notify rewards, report yield, etc. For challenge scoring, assume the owner is **honest** — admin-only exploits ("if the owner is malicious") are out of scope. Bugs should be exploitable by an unprivileged attacker or require only privileged actions any admin would plausibly take (normal config changes, normal reward issuance).
+
+External conditions not attacker-controlled (oracle depegs the attacker can't cause, MEV on pools outside scope) are also out of scope.
+
+Contracts use `Ownable2Step`, `ReentrancyGuard`, `Pausable`. `SafeERC20` for all transfers. Fee-on-transfer tokens and rebasing tokens are explicitly rejected via pre/post balance deltas.
 
 ---
 
 ## The Three Contracts
 
-### `src/Vault.sol` — Multi-Asset Vault
+### `src/Vault.sol` — Multi-Asset Vault (≈600 lines)
 
-An ERC-4626-inspired vault that accepts multiple whitelisted stable-denominated ERC-20s, issues shares proportional to deposits, and includes:
+An ERC-4626-inspired vault that accepts multiple whitelisted stable-denominated ERC-20s. Shares track pro-rata claim on total WAD-normalized assets.
 
-- Multi-asset support with WAD normalization across decimals (6, 8, 18)
-- Management fee (time-based, annualized) and performance fee (on yield above a per-share high-water mark)
-- Block-based withdrawal timelock with per-asset liquidity reservation
-- Two-step withdraw (`requestWithdraw` → wait → `claimWithdraw`) plus cancellation
-- Pull-based `reportYield(asset, amount)` — admin deposits real tokens as yield
-- Virtual-share offset for first-depositor inflation protection
-- Fee-on-transfer rejection via pre/post balance delta
+**Key mechanics:**
+- Deposit any whitelisted asset → receive shares
+- Internal accounting in 1e18 WAD; token decimals normalized at entry/exit
+- `requestWithdraw` burns shares, freezes `wadOwed`, starts block-based timelock; `claimWithdraw` pays out after unlock; `cancelWithdraw` returns original shares
+- Management fee (annualized, time-based) + performance fee (on per-share HWM lift)
+- Per-share HWM: deposits/withdrawals don't lift it; only `reportYield(asset, amount)` from admin does
+- Pending withdrawals get proportional yield share + pay pending-side performance fee immediately
+- Virtual-share offset + `MIN_INITIAL_DEPOSIT` block first-depositor inflation
 
-~553 lines. ERC-4626-like share math, per-share HWM, multi-asset decimals.
+**Fee schedule mental model:**
+- PPS (price per share) = `activeManagedWad / (totalShares + VSO)` in WAD-scaled units (× PPS_SCALE for internal precision)
+- `_accrueFees` runs on every state-mutating entry point: time passes → mgmt fee minted → PPS lifts past HWM → perf fee minted
 
-### `src/Staking.sol` — Lock-Tiered Staking
+### `src/Staking.sol` — Lock-Tiered Staking (≈630 lines)
 
-A Synthetix StakingRewards-style contract with lock tiers, multi-reward distribution, and penalty redistribution:
+Synthetix `StakingRewards` × MasterChef × veToken-lite. Users stake one token into lock tiers with boost multipliers; accrue rewards in multiple tokens; penalties from early unstakers redistribute to remaining stakers.
 
-- Configurable lock tiers (e.g., 30/60/90 days) with boost multipliers (e.g., 1x / 1.5x / 3x)
-- Multiple reward tokens, each with independent `rewardRate` / `periodFinish` / `rewardPerTokenStored`
-- Early-unstake penalty routed into a penalty pool that drips back into the primary reward stream
-- Per-user active stake count/boosted-amount tracked in storage (not scanned from history)
-- `compound()` to restake primary-token rewards
-- Penalty flush folds into remaining stream duration (no schedule reset)
+**Key invariants:**
+- `primaryRewardToken == stakingToken` always (enforced in constructor and `setPrimaryRewardToken`)
+- Early-unstake penalty queues in `primaryRewardToken`'s `queuedPenalty`; `flushPenalty()` moves it into the reward stream WITHOUT extending `periodFinish` (if a stream is active, it's folded into remaining duration)
+- `_updateRewardAll(user)` MUST run before any mutation of `_userBoostedAmount[user]` / `totalBoostedSupply` — it snapshots reward accumulator state
+- `compound()` zeros reward balance before staking — no double-count; primary token already in contract, no transfer
+- Per-user active stake count + boosted amount tracked in storage (O(1) reward-update reads)
 
-~630 lines. Synthetix accumulator pattern, multi-reward, boosts, penalty redistribution.
+**Lock tiers:** monotonic `tierId`s, never reused. Disabling a tier doesn't affect existing stakes on that tier.
 
-### `src/Lending.sol` + `src/libs/LendingMath.sol` — Lending Pool
+### `src/Lending.sol` + `src/libs/LendingMath.sol` — Lending Pool (≈930 lines total)
 
-An Aave v2-lite lending protocol:
+Aave v2-lite. Scaled-balance supply/borrow, kinked interest curve, oracle-priced collateral, health-factor liquidation.
 
-- Scaled-balance supply and borrow with RAY-precision indices
-- Kinked interest rate model (base + slope1 + slope2 at optimal utilization)
-- Price oracle with staleness check (see `src/PriceOracle.sol`)
-- Multi-asset collateral with per-reserve collateral factor, liquidation threshold, liquidation bonus, reserve factor
-- Health-factor-based liquidation with close factor
-- Liquidator receives collateral as an internal supply position (Aave v2 `receiveAToken=true` style)
-- Per-reserve `accruedReserves` protected from supplier/borrower withdrawal
+**Scale conventions (memorize these):**
 
-~760 lines + ~165 lines of math library. Kinked IR curve, oracle staleness, liquidation mechanics.
+| Unit | Value | Used for |
+|---|---|---|
+| **RAY** | 1e27 | `supplyIndex`, `borrowIndex`, interest rates (per-year and per-second) |
+| **WAD** | 1e18 | USD values, health factor, price normalization |
+| **BPS** | 10_000 | Config params (collateral factor, liquidation threshold, bonus, reserve factor, close factor) |
+| **Oracle** | 1e8 | Chainlink-style raw oracle prices (normalized to WAD internally) |
 
-### Supporting Files
+**Scaled-balance invariant:** `user_underlying = user_scaled × index / RAY`, floor-rounded. Index monotonically increases over time.
 
-- `src/PriceOracle.sol` — settable oracle with Chainlink-style 8-decimal prices (used by Lending)
-- `src/interfaces/` — interface stubs for each contract
-- `src/mocks/MockERC20.sol` — for tests
+**Liquidation:** if borrower HF < 1e18, anyone can repay up to `closeFactor × debt` and receive the borrower's collateral at a discount. Liquidator receives collateral as an internal supply position (no external transfer of collateral tokens).
 
-## Requirements
+**Oracle:** `getPrice(asset) returns (price, updatedAt)`. Staleness check lives in `Lending.sol`, not the oracle itself. Debt-free withdraws skip oracle reads.
 
-- [Foundry](https://book.getfoundry.sh/)
-- Solidity `^0.8.24`, EVM version `cancun`
-- OpenZeppelin Contracts v5.1
+---
+
+## Where to Look (Tactical Advice)
+
+Good stumps almost always live where **two features interact**:
+- Vault: fee accrual × pending withdrawals, reportYield × skewed active/pending ratios
+- Staking: reward accumulator × compound/emergencyUnstake ordering, penalty flush × mid-period rate recalc
+- Lending: interest accrual × liquidation, oracle staleness × health factor, index rounding × long-horizon drift
+
+Single-line rounding flips often beat multi-line reworks. Diff size is not judged; severity, subtlety, realism, novelty are.
+
+---
 
 ## Quickstart
 
@@ -75,56 +136,72 @@ forge test
 ```
 
 Invariant tests:
-
 ```bash
 forge test --match-path "test/invariants/*"
 ```
 
 Fuzz coverage:
-
 ```bash
 forge test --fuzz-runs 1000
 ```
 
-## For Challenge Participants
+### PoC Harness Template
 
-1. Read the contract you plan to attack. Don't skim.
-2. Identify where two features interact — fee accrual × timelock, reward accumulator × boost, interest accrual × liquidation threshold. These are usually where the best bugs live.
-3. Plant the smallest possible change. Single-line rounding flips beat elaborate reworks.
-4. Scan via AI Auditor Lite. If caught, pivot.
-5. Submit via the official form when AI Auditor misses the bug.
+See `test/PlantPoC.t.sol.example` — copy to `test/PlantPoC.t.sol`, plant your bug, write a Foundry test that demonstrates the exploit. This is the preferred way to validate a plant before submitting.
 
-Full rules, severity bar, prize structure, and submission format: [challenge page].
+### Scanning
 
-## Severity Bar
+1. Modify one of the three contracts (≤50 lines).
+2. `forge build` must still pass.
+3. Run AI Auditor Lite against the modified `.sol`.
+4. If Lite flags your bug, one scan is used — you have 3 left total.
+5. If Lite doesn't flag it, grab the public scan link and submit via the challenge form.
 
-Submissions must be **Critical** or **High** severity. Specifically:
+Each scan is one attempt. Use them however you want — all 4 on one contract, spread across contracts, whatever. Max mode is disabled for the challenge; everyone is evaluated on the same Lite baseline.
 
-**Critical:**
-- Direct theft of user funds
-- Permanent freezing of user funds
-- Protocol insolvency
+---
 
-**High:**
-- Theft of unclaimed yield or rewards
-- Permanent freezing of unclaimed yield
-- Temporary freezing of user funds
+## Requirements
 
-Medium and below are not accepted. Neither are trivial backdoors (public `drain()`, hardcoded addresses, removed modifiers).
+- [Foundry](https://book.getfoundry.sh/) — install via `curl -L https://foundry.paradigm.xyz | bash && foundryup`
+- Solidity `^0.8.24`, EVM version `cancun`
+- OpenZeppelin Contracts v5.1 (pinned submodule)
 
-## Verification
+If `forge build` fails on a fresh clone with the unmodified base, that's our bug — email us and we'll patch + reset your scan count on the affected contract.
 
-These base contracts have passed:
+---
 
-- Self-audit by the original writer
-- Two independent adversarial reviews per contract (different LLM families, fresh sessions)
-- Multiple rounds of fixing based on review findings
-- Foundry unit tests (>90% line coverage per contract)
+## Verification History
+
+Base contracts have passed:
+
+- Self-audit by original writer
+- Multiple rounds of adversarial review by different LLM families (fresh sessions, adversarial prompts)
+- Multiple fix iterations based on review findings
+- Foundry unit tests (>90% line coverage per contract, 196 tests total)
 - Foundry invariant tests (100+ runs × 50 depth)
 - Foundry fuzz tests (1000+ runs)
 
-If you find a bug in the base contracts themselves (not something you planted), please email [contact] — we'll patch, announce publicly, and reset affected scan counts. Real base-contract bugs shouldn't happen, but if they do we want to know.
+If you find a real bug in the unmodified base (not something you planted), email **[challenge@certik.com]** — we'll patch, announce publicly, and reset affected scan counts.
+
+---
+
+## What You Have vs. What You Don't
+
+This repo includes:
+- `src/` — the three contracts + interfaces + mocks + oracle
+- `test/` — test suites (reference, shows intended behavior)
+- `script/` — deployment scripts (not needed for challenge)
+- `lib/` — OZ + forge-std submodules
+
+This repo excludes:
+- Design specs (what we wrote before implementing)
+- Internal review docs (findings and fixes we've already addressed)
+
+Test suite is open — read it freely. It won't give away a plant idea; it validates the contract's intended behavior, which is the thing you need to break.
+
+---
 
 ## License
 
-MIT.
+MIT. Use the base contracts for whatever you want outside the challenge.

@@ -11,8 +11,31 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IStaking} from "./interfaces/IStaking.sol";
 
 /// @title Lock-tiered multi-reward staking with penalty redistribution
-/// @notice Users may only enter new positions while unpaused, but they can always exit existing positions.
-/// @notice Claims remain available while paused because accrued value is treated as an exit path.
+///
+/// @notice Accounting model — read this before attempting to modify anything:
+///
+///   Two accounting planes that meet at `totalBoostedSupply`:
+///     1. Per-stake principal: `_userStakes[user][]` holds each stake position (amount, boostedAmount, tierId, start, unlock,
+///        withdrawn). Principal is separate from rewards — unstaking returns principal, claim returns rewards.
+///     2. Reward accumulator (Synthetix StakingRewards pattern): each reward token has `rewardRate`, `periodFinish`,
+///        `rewardPerTokenStored`, `lastUpdateTime`. Users earn via `userRewardPerTokenPaid` vs. current `rewardPerToken`,
+///        weighted by `_userBoostedAmount[user]`.
+///
+///   Critical invariants:
+///     - `primaryRewardToken == stakingToken` always. Constructor enforces; `setPrimaryRewardToken` enforces.
+///     - `_updateRewardAll(user)` MUST run before any mutation of `_userBoostedAmount[user]`, `totalBoostedSupply`, or any
+///       per-user stake state. This snapshots the reward accumulator at the pre-change weight so users can't retroactively
+///       capture reward value from state changes.
+///     - `_userActiveStakeCount[user]` and `_userBoostedAmount[user]` are storage-tracked (O(1) reads), not derived by
+///       scanning `_userStakes[user][]` on every call. Keeping them consistent is the caller's responsibility on every
+///       mutation path.
+///     - Early-unstake penalties route into `primaryRewardToken`'s `queuedPenalty`. `flushPenalty()` moves queued penalty
+///       into the reward stream WITHOUT extending `periodFinish` — if a stream is active, penalty is folded into the
+///       remaining window's rate. This prevents schedule-extension griefing.
+///     - `compound()` zeros the user's primary-token reward balance BEFORE creating the new stake. No transfer — the tokens
+///       are already in the contract.
+///
+///   Pause matrix: stake + compound blocked; unstake + emergencyUnstake + claim + claim(token) always available.
 contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
