@@ -62,17 +62,17 @@ Contracts use `Ownable2Step`, `ReentrancyGuard`, `Pausable`, and `SafeERC20`. Fe
 
 ## The Three Contracts
 
-### `src/Vault.sol` — Multi-Asset Vault
+### `src/Vault/Vault.sol` — Multi-Asset Vault
 
-ERC-4626-inspired vault over multiple whitelisted stablecoins. Shares claim pro-rata on WAD-normalized assets. Management fee (time-based) + performance fee (on per-share HWM lift). Block-based withdrawal timelock with proportional pending-side yield share. Virtual-share offset blocks first-depositor inflation attacks.
+ERC-4626-inspired vault over multiple whitelisted stablecoins. Shares claim pro-rata on WAD-normalized assets. Management fee (time-based) + performance fee (on per-share HWM lift). Block-based withdrawal timelock with proportional pending-side yield share. Virtual-share offset blocks first-depositor inflation attacks. Full mechanics: [`src/Vault/README.md`](./src/Vault/README.md).
 
-### `src/Staking.sol` — Lock-Tiered Staking
+### `src/Staking/Staking.sol` — Lock-Tiered Staking
 
-Synthetix `StakingRewards` × MasterChef × veToken-lite. Users stake into tiered locks with boost multipliers, accrue rewards in multiple tokens, and early-unstake penalties redistribute to remaining stakers. `primaryRewardToken == stakingToken` is a load-bearing invariant.
+Synthetix `StakingRewards` × MasterChef × veToken-lite. Users stake into tiered locks with boost multipliers, accrue rewards in multiple tokens, and early-unstake penalties redistribute to remaining stakers. `primaryRewardToken == stakingToken` is a load-bearing invariant. Full mechanics: [`src/Staking/README.md`](./src/Staking/README.md).
 
-### `src/Lending.sol` — Lending Pool
+### `src/Lending/Lending.sol` — Lending Pool
 
-Aave v2-lite. Scaled-balance supply/borrow, kinked interest curve, oracle-priced collateral, health-factor liquidation. Scales: **RAY** (1e27) for indices and rates, **WAD** (1e18) for USD and HF, **BPS** (10_000) for config params, **1e8** for raw Chainlink-style oracle prices.
+Aave v2-lite. Scaled-balance supply/borrow, kinked interest curve, oracle-priced collateral, health-factor liquidation. Scales: **RAY** (1e27) for indices and rates, **WAD** (1e18) for USD and HF, **BPS** (10_000) for config params, **1e8** for raw Chainlink-style oracle prices. Full mechanics: [`src/Lending/README.md`](./src/Lending/README.md).
 
 ## Where to Look
 
