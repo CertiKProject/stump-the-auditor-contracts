@@ -89,6 +89,7 @@ interface ILendingPool {
     error CloseFactorTooHigh(uint256 requested, uint256 max);
     error SelfLiquidation();
     error DebtAssetIsCollateralAsset(); // liquidation: collateralAsset != debtAsset required (simplifies math; document as an intentional limit)
+    error SameAssetCollateralDebtNotAllowed();
     error LiquidationAmountExceedsCloseFactor(uint256 requested, uint256 max);
     error LiquidationSeizeTooSmall(uint256 debtToCover);
     error UnsupportedToken(address token); // fee-on-transfer

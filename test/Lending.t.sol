@@ -422,9 +422,7 @@ contract LendingTest is BaseTest {
         assertLe(fragmentedSeized, singleSeized + 1);
     }
 
-    function testLiquidationDustSeizeRevertsInsteadOfTakingOneCollateralUnit() public {
-        bytes4 seizeTooSmall = bytes4(keccak256("LiquidationSeizeTooSmall(uint256)"));
-
+    function testLiquidationDustSeizeClosesTinyCollateralPosition() public {
         vm.prank(owner);
         lending.setCloseFactor(10_000);
 
@@ -438,9 +436,16 @@ contract LendingTest is BaseTest {
         vm.prank(owner);
         oracle.setPrice(address(usdc), 1);
 
-        vm.expectRevert(abi.encodeWithSelector(seizeTooSmall, 1));
         vm.prank(charlie);
-        lending.liquidate(bob, address(usdc), address(weth), 1);
+        (uint256 repaid, uint256 seized) = lending.liquidate(bob, address(usdc), address(weth), 1);
+
+        assertEq(repaid, 1);
+        assertEq(seized, 1);
+        (uint256 bobCollateralAfter, uint256 bobDebtAfter) = lending.getUserReserveData(bob, address(usdc));
+        assertEq(bobCollateralAfter, 0);
+        assertEq(bobDebtAfter, 0);
+        assertFalse(_contains(lending.getUserCollateralAssets(bob), address(usdc)));
+        assertEq(lending.userScaledSupply(charlie, address(usdc)), 1);
     }
 
     function testDustDebtCanLiquidateWhenCloseFactorWouldRoundToZeroScaledDebt() public {
@@ -507,8 +512,14 @@ contract LendingTest is BaseTest {
         for (uint256 i; i < assets.length; ++i) {
             for (uint256 j; j < assets.length; ++j) {
                 _supply(alice, assets[i], supplyAmounts[i], alice);
-                _borrow(alice, assets[j], borrowAmounts[j], alice);
-                _repay(alice, assets[j], type(uint256).max, alice);
+                if (i == j) {
+                    vm.expectRevert(bytes4(keccak256("SameAssetCollateralDebtNotAllowed()")));
+                    vm.prank(alice);
+                    lending.borrow(address(assets[j]), borrowAmounts[j], alice);
+                } else {
+                    _borrow(alice, assets[j], borrowAmounts[j], alice);
+                    _repay(alice, assets[j], type(uint256).max, alice);
+                }
                 _withdraw(alice, assets[i], type(uint256).max, alice);
 
                 (uint256 supplyBalance, uint256 borrowBalance) = lending.getUserReserveData(alice, address(assets[i]));
@@ -525,6 +536,17 @@ contract LendingTest is BaseTest {
         address[] memory collateralAssets = lending.getUserCollateralAssets(alice);
         assertEq(collateralAssets.length, 1);
         assertEq(collateralAssets[0], address(usdc));
+    }
+
+    function testBorrowRejectsAssetAlreadySuppliedByBorrower() public {
+        bytes4 sameAsset = bytes4(keccak256("SameAssetCollateralDebtNotAllowed()"));
+
+        _supply(alice, usdc, 1_000e6, alice);
+        _supply(bob, usdc, 1_000e6, bob);
+
+        vm.expectRevert(sameAsset);
+        vm.prank(alice);
+        lending.borrow(address(usdc), 100e6, alice);
     }
 
     function testThirdPartyStaleCollateralDustDoesNotBlockLiquidation() public {

@@ -215,6 +215,7 @@ contract VaultTest is BaseTest {
 
         _reportYield(fresh, usdc, 20e6);
         _reportYield(fresh, dai, 10 ether);
+        _reportYield(fresh, dai, 1e12);
 
         uint256 aliceShares = fresh.userShares(alice);
         uint256 bobShares = fresh.userShares(bob);
@@ -234,7 +235,7 @@ contract VaultTest is BaseTest {
         uint256 bobOut = fresh.claimWithdraw();
 
         assertApproxEqAbs(aliceOut, 120e6, 1);
-        assertEq(bobOut, 60 ether);
+        assertApproxEqAbs(bobOut, 60 ether, 1e12);
         assertLe(fresh.totalAssets(), 1);
     }
 
@@ -721,6 +722,28 @@ contract VaultTest is BaseTest {
 
         assertGt(minted, 0);
         assertEq(fresh.highWaterMarkPPS(), WAD);
+    }
+
+    function testDepositRevertsWhenPpsRoundsMintedSharesToZero() public {
+        Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
+
+        _depositDai(fresh, alice, 1 ether);
+        _reportYield(fresh, dai, 1_000 ether);
+
+        uint256 bobBalanceBefore = dai.balanceOf(bob);
+        uint256 vaultBalanceBefore = dai.balanceOf(address(fresh));
+        uint256 totalManagedBefore = fresh.totalAssets();
+        uint256 totalSharesBefore = fresh.totalShares();
+
+        vm.expectRevert(IVault.ZeroAmount.selector);
+        vm.prank(bob);
+        fresh.deposit(address(dai), 1, bob);
+
+        assertEq(dai.balanceOf(bob), bobBalanceBefore);
+        assertEq(dai.balanceOf(address(fresh)), vaultBalanceBefore);
+        assertEq(fresh.totalAssets(), totalManagedBefore);
+        assertEq(fresh.totalShares(), totalSharesBefore);
+        assertEq(fresh.userShares(bob), 0);
     }
 
     function testInitialDepositFloorUsesNormalizedValue() public {
@@ -1399,6 +1422,36 @@ contract VaultTest is BaseTest {
         );
         vm.prank(bob);
         fresh.requestWithdraw(bobShares, address(usdc));
+    }
+
+    function testRequestWithdrawStoresOnlyPayableWadForSixDecimalAsset() public {
+        Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
+
+        _depositUsdc(fresh, alice, 100e6);
+
+        uint256 shares = fresh.userShares(alice) / 3;
+        uint256 rawWadOwed = fresh.previewWithdraw(shares);
+        uint256 reservedAmount = _fromWad(rawWadOwed, 6);
+        uint256 payableWad = _toWad(reservedAmount, 6);
+        assertGt(rawWadOwed, payableWad);
+
+        vm.prank(alice);
+        fresh.requestWithdraw(shares, address(usdc));
+
+        IVault.WithdrawRequest memory request = fresh.getPendingWithdraw(alice);
+        assertEq(request.reservedAmount, reservedAmount);
+        assertEq(request.wadOwed, payableWad);
+        assertEq(uint256(vm.load(address(fresh), bytes32(uint256(20)))), payableWad);
+
+        uint256 totalManagedBeforeClaim = fresh.totalAssets();
+        advanceBlocks(DEFAULT_TIMELOCK);
+
+        vm.prank(alice);
+        uint256 amountOut = fresh.claimWithdraw();
+
+        assertEq(amountOut, reservedAmount);
+        assertEq(fresh.totalAssets(), totalManagedBeforeClaim - payableWad);
+        assertEq(uint256(vm.load(address(fresh), bytes32(uint256(20)))), 0);
     }
 
     function testReportYieldIgnoresPendingRequestAssetLiquidity() public {

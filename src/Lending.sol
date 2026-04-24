@@ -66,6 +66,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
     uint8 public constant ORACLE_DECIMALS = 8;
     uint8 public constant MIN_RESERVE_DECIMALS = 6;
     uint8 public constant MAX_RESERVE_DECIMALS = 18;
+    uint256 public constant DUST_LIQUIDATION_THRESHOLD_WAD = 1e14;
 
     mapping(address => Reserve) public reserves;
     address[] public reserveList;
@@ -182,6 +183,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
 
         Reserve storage reserve = _getReserveStorage(asset);
         if (!reserve.borrowEnabled) revert BorrowDisabled(asset);
+        if (userScaledSupply[msg.sender][asset] != 0) revert SameAssetCollateralDebtNotAllowed();
 
         // rounding: borrow mints scaled debt UP so the borrower owes at least the requested amount.
         uint256 scaledAmount = Math.mulDiv(amount, RAY, reserve.borrowIndex, Math.Rounding.Ceil);
@@ -684,6 +686,17 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 borrowerCollateral = LendingMath.scaledToUnderlying(
             borrowerScaledCollateral, collateralReserve.supplyIndex, Math.Rounding.Floor
         );
+        bool dustLiquidation = _isDustLiquidation(collateralAsset, borrowerCollateral, debtValueWad);
+        if (dustLiquidation && (targetCollateralAmount == 0 || targetCollateralAmount > borrowerCollateral)) {
+            return _transferAllDustCollateral(
+                borrower,
+                liquidator,
+                collateralAsset,
+                borrowerScaledCollateral,
+                borrowerCollateral,
+                baseCollateralAmount
+            );
+        }
         if (targetCollateralAmount > borrowerCollateral) {
             revert InsufficientSupply(collateralAsset, targetCollateralAmount, borrowerCollateral);
         }
@@ -693,6 +706,16 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
             Math.mulDiv(targetCollateralAmount, RAY, collateralReserve.supplyIndex, Math.Rounding.Floor);
         if (scaledCollateralTransfer > borrowerScaledCollateral) {
             scaledCollateralTransfer = borrowerScaledCollateral;
+        }
+        if (scaledCollateralTransfer == 0 && dustLiquidation) {
+            return _transferAllDustCollateral(
+                borrower,
+                liquidator,
+                collateralAsset,
+                borrowerScaledCollateral,
+                borrowerCollateral,
+                baseCollateralAmount
+            );
         }
 
         collateralSeized = LendingMath.scaledToUnderlying(
@@ -730,6 +753,44 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
             _hasCollateral[liquidator][collateralAsset] = true;
             userCollateralAssets[liquidator].push(collateralAsset);
         }
+    }
+
+    function _isDustLiquidation(address collateralAsset, uint256 borrowerCollateral, uint256 debtValueWad)
+        internal
+        view
+        returns (bool)
+    {
+        if (borrowerCollateral == 0 || debtValueWad == 0 || debtValueWad > DUST_LIQUIDATION_THRESHOLD_WAD) {
+            return false;
+        }
+
+        uint256 collateralValueWad = _getAssetValueWad(collateralAsset, borrowerCollateral);
+        return collateralValueWad != 0 && collateralValueWad <= DUST_LIQUIDATION_THRESHOLD_WAD;
+    }
+
+    function _transferAllDustCollateral(
+        address borrower,
+        address liquidator,
+        address collateralAsset,
+        uint256 borrowerScaledCollateral,
+        uint256 borrowerCollateral,
+        uint256 baseCollateralAmount
+    ) internal returns (uint256 collateralSeized, uint256 liquidatorBonus) {
+        if (borrowerCollateral == 0) revert LiquidationSeizeTooSmall(0);
+
+        userScaledSupply[borrower][collateralAsset] = 0;
+        userScaledSupply[liquidator][collateralAsset] += borrowerScaledCollateral;
+
+        if (_hasCollateral[borrower][collateralAsset]) {
+            _removeCollateralAsset(borrower, collateralAsset);
+        }
+        if (borrowerScaledCollateral != 0 && !_hasCollateral[liquidator][collateralAsset]) {
+            _hasCollateral[liquidator][collateralAsset] = true;
+            userCollateralAssets[liquidator].push(collateralAsset);
+        }
+
+        collateralSeized = borrowerCollateral;
+        liquidatorBonus = collateralSeized > baseCollateralAmount ? collateralSeized - baseCollateralAmount : 0;
     }
 
     function _getAssetValueWad(address asset, uint256 amount) internal view returns (uint256 valueWad) {

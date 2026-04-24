@@ -129,14 +129,7 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
 
         bool initializingSupply = totalShares == 0;
 
-        IERC20 assetToken = IERC20(asset);
-        uint256 balanceBefore = assetToken.balanceOf(address(this));
-        assetToken.safeTransferFrom(msg.sender, address(this), amount);
-        uint256 balanceAfter = assetToken.balanceOf(address(this));
-        uint256 received = balanceAfter - balanceBefore;
-        if (received != amount) revert UnsupportedToken(asset);
-
-        uint256 amountWad = _toWad(received, config.decimals);
+        uint256 amountWad = _toWad(amount, config.decimals);
         if (amountWad == 0) revert ZeroAmount();
         if (initializingSupply && amountWad < MIN_INITIAL_DEPOSIT) {
             revert InitialDepositTooSmall(amountWad, MIN_INITIAL_DEPOSIT);
@@ -144,6 +137,14 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
 
         uint256 activeManagedWad = _activeManagedWad();
         sharesMinted = _computeShares(amountWad, totalShares, activeManagedWad);
+        if (sharesMinted == 0) revert ZeroAmount();
+
+        IERC20 assetToken = IERC20(asset);
+        uint256 balanceBefore = assetToken.balanceOf(address(this));
+        assetToken.safeTransferFrom(msg.sender, address(this), amount);
+        uint256 balanceAfter = assetToken.balanceOf(address(this));
+        uint256 received = balanceAfter - balanceBefore;
+        if (received != amount) revert UnsupportedToken(asset);
 
         totalManagedWad += amountWad;
         totalShares += sharesMinted;
@@ -186,6 +187,7 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 wadOwed = _computeAssets(shares, totalShares, _activeManagedWad());
         uint256 reservedAmount = _fromWad(wadOwed, config.decimals);
         if (wadOwed != 0 && reservedAmount == 0) revert ZeroAmount();
+        uint256 effectiveWadOwed = _toWad(reservedAmount, config.decimals);
         uint256 availableLiquidity = _syncTrackedHoldings(asset, config);
         uint256 alreadyReserved = reservedForWithdraw[asset];
         uint256 unreservedLiquidity = availableLiquidity > alreadyReserved ? availableLiquidity - alreadyReserved : 0;
@@ -196,13 +198,13 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
         _userShares[msg.sender] = availableShares - shares;
         totalShares -= shares;
         sharesByAsset[asset] -= shares;
-        totalPendingWithdrawWad += wadOwed;
+        totalPendingWithdrawWad += effectiveWadOwed;
         reservedForWithdraw[asset] = alreadyReserved + reservedAmount;
 
         unlockBlock = uint64(block.number + timelockBlocks);
         pendingWithdraw[msg.sender] = WithdrawRequest({
             shares: shares,
-            wadOwed: wadOwed,
+            wadOwed: effectiveWadOwed,
             reservedAmount: reservedAmount,
             asset: asset,
             unlockBlock: unlockBlock,
@@ -210,7 +212,7 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
         });
         _addPendingUser(msg.sender);
 
-        emit WithdrawRequested(msg.sender, shares, wadOwed, asset, unlockBlock);
+        emit WithdrawRequested(msg.sender, shares, effectiveWadOwed, asset, unlockBlock);
     }
 
     /// @notice Claims an unlocked withdrawal request in the asset chosen at request time.
