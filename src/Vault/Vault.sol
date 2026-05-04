@@ -215,6 +215,43 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
         emit WithdrawRequested(msg.sender, shares, effectiveWadOwed, asset, unlockBlock);
     }
 
+    function topUpWithdraw(uint256 extraShares) external nonReentrant whenNotPaused returns (uint256 extraWad) {
+        if (extraShares == 0) revert ZeroAmount();
+        WithdrawRequest storage request = pendingWithdraw[msg.sender];
+        if (request.shares == 0) revert NoPendingWithdraw(msg.sender);
+
+        address asset = request.asset;
+        AssetConfig storage config = _requireWhitelistedAsset(asset);
+        _materializeUnboundFeeShares(msg.sender, asset);
+        _requireShareAsset(msg.sender, asset);
+
+        uint256 availableShares = _userShares[msg.sender];
+        if (extraShares > availableShares) revert InsufficientShares(extraShares, availableShares);
+
+        extraWad = Math.mulDiv(extraShares, request.wadOwed, request.shares);
+        uint256 extraReserved = _fromWad(extraWad, config.decimals);
+        if (extraWad != 0 && extraReserved == 0) revert ZeroAmount();
+
+        uint256 availableLiquidity = _syncTrackedHoldings(asset, config);
+        uint256 alreadyReserved = reservedForWithdraw[asset];
+        uint256 unreservedLiquidity = availableLiquidity > alreadyReserved ? availableLiquidity - alreadyReserved : 0;
+        if (extraReserved > unreservedLiquidity) {
+            revert InsufficientAssetLiquidity(asset, extraReserved, unreservedLiquidity);
+        }
+
+        _userShares[msg.sender] = availableShares - extraShares;
+        totalShares -= extraShares;
+        sharesByAsset[asset] -= extraShares;
+        totalPendingWithdrawWad += extraWad;
+        reservedForWithdraw[asset] = alreadyReserved + extraReserved;
+
+        request.shares += extraShares;
+        request.wadOwed += extraWad;
+        request.reservedAmount += extraReserved;
+
+        emit WithdrawRequested(msg.sender, extraShares, extraWad, asset, request.unlockBlock);
+    }
+
     /// @notice Claims an unlocked withdrawal request in the asset chosen at request time.
     /// @return amountOut The token-native amount transferred to the caller.
     function claimWithdraw() external nonReentrant returns (uint256 amountOut) {

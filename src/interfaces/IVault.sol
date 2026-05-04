@@ -49,6 +49,7 @@ interface IVault {
 
     function deposit(address asset, uint256 amount, address receiver) external returns (uint256 sharesMinted);
     function requestWithdraw(uint256 shares, address asset) external returns (uint64 unlockBlock);
+    function topUpWithdraw(uint256 extraShares) external returns (uint256 extraWad);
     function claimWithdraw() external returns (uint256 amountOut);
     function cancelWithdraw() external;
 
